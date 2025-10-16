@@ -1,0 +1,5 @@
+{
+  "name": "AI Classroom Assistant",
+  "description": "An intelligent assistant that connects to your Google Classroom to help solve assignments. It generates solutions, creates necessary files (including handwritten PDFs), zips them for submission, and allows you to download the results.",
+  "requestFramePermissions": []
+}
