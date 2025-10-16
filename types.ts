@@ -1,4 +1,14 @@
 
+export interface Attachment {
+  title: string;
+  driveFile: {
+    id: string;
+    title: string;
+    alternateLink: string;
+    mimeType: string;
+  };
+}
+
 export interface Course {
   id: string;
   name: string;
@@ -12,6 +22,7 @@ export interface Assignment {
   title: string;
   description: string;
   dueDate: string;
+  attachments: Attachment[];
   // This ID is needed for submitting work
   studentSubmissionId?: string; 
 }

@@ -1,5 +1,5 @@
 // services/classroomApi.ts
-import type { Course, Assignment, FileBlob } from '../types';
+import type { Course, Assignment, FileBlob, Attachment } from '../types';
 import authService from './auth';
 
 declare var gapi: any;
@@ -47,10 +47,9 @@ class ClassroomApiService {
 
     const coursework = response.result.courseWork || [];
 
-    // We need the student submission ID to be able to turn in work
     const submissionsResponse = await gapi.client.classroom.courses.courseWork.studentSubmissions.list({
         courseId: courseId,
-        courseWorkId: '-', // '-' is a wildcard for all coursework in the course
+        courseWorkId: '-',
         userId: 'me'
     });
 
@@ -61,23 +60,63 @@ class ClassroomApiService {
         });
     }
 
-    return coursework.map((item: any): Assignment => ({
-        id: item.id,
-        courseId: item.courseId,
-        title: item.title,
-        description: item.description || 'No description provided.',
-        dueDate: formatDate(item.dueDate),
-        studentSubmissionId: submissionsMap.get(item.id)
-    }));
+    return coursework.map((item: any): Assignment => {
+        const attachments: Attachment[] = (item.materials || [])
+            .filter((m: any) => m.driveFile)
+            .map((m: any) => ({
+                title: m.driveFile.driveFile.title,
+                driveFile: {
+                    id: m.driveFile.driveFile.id,
+                    title: m.driveFile.driveFile.title,
+                    alternateLink: m.driveFile.driveFile.alternateLink,
+                    mimeType: m.driveFile.driveFile.mimeType,
+                }
+            }));
+
+        return {
+            id: item.id,
+            courseId: item.courseId,
+            title: item.title,
+            description: item.description || 'No description provided.',
+            dueDate: formatDate(item.dueDate),
+            attachments: attachments,
+            studentSubmissionId: submissionsMap.get(item.id)
+        };
+    });
+  }
+
+  async getAttachmentContent(fileId: string, mimeType: string): Promise<string> {
+    try {
+        // Handle Google Workspace file types by exporting them as plain text
+        const googleMimeTypes: { [key: string]: string } = {
+            'application/vnd.google-apps.document': 'text/plain',
+            'application/vnd.google-apps.spreadsheet': 'text/csv',
+            'application/vnd.google-apps.presentation': 'text/plain'
+        };
+
+        if (googleMimeTypes[mimeType]) {
+            const response = await gapi.client.drive.files.export({
+                fileId: fileId,
+                mimeType: googleMimeTypes[mimeType]
+            });
+            return response.body;
+        }
+
+        // For other readable types, you could add more handlers here.
+        // For now, we inform the AI we can't read non-Google Workspace files.
+        return `[Content of file type (${mimeType}) cannot be read by the assistant.]`;
+
+    } catch (error) {
+        console.error(`Failed to fetch content for file ${fileId}:`, error);
+        return `[Error reading attachment content.]`;
+    }
   }
 
   async submitAssignment(courseId: string, courseWorkId: string, submissionId: string, files: FileBlob[]): Promise<{ success: true }> {
-    // Step 1: Upload files to Google Drive
     const driveFileIds = await Promise.all(
       files.map(file => this.uploadFileToDrive(file))
     );
     
-    // Step 2: Attach Drive files to the assignment submission
     await gapi.client.classroom.courses.courseWork.studentSubmissions.modifyAttachments({
       courseId: courseId,
       courseWorkId: courseWorkId,
@@ -89,7 +128,6 @@ class ClassroomApiService {
       }
     });
 
-    // Step 3: Turn in the assignment
     await gapi.client.classroom.courses.courseWork.studentSubmissions.turnIn({
         courseId: courseId,
         courseWorkId: courseWorkId,
@@ -106,8 +144,6 @@ class ClassroomApiService {
     
     const metadata = {
       name: file.name,
-      // You might want to place it in a specific folder
-      // parents: ['FOLDER_ID'] 
     };
 
     const form = new FormData();

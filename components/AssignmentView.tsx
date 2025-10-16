@@ -1,7 +1,7 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { GoogleGenAI, Type } from '@google/genai';
 import type { Assignment, Course, GeneratedFile, FileBlob } from '../types';
-import { DownloadIcon, CheckCircleIcon } from './icons';
+import { DownloadIcon, CheckCircleIcon, PaperclipIcon } from './icons';
 import classroomApi from '../services/classroomApi';
 import FontSelector from './FontSelector';
 
@@ -16,6 +16,7 @@ interface AssignmentViewProps {
 
 enum Status {
   IDLE,
+  FETCHING_ATTACHMENTS,
   SOLVING,
   GENERATING_FILES,
   ZIPPING,
@@ -29,6 +30,7 @@ type SubmissionStatus = 'IDLE' | 'SUCCESS';
 
 const statusMessages = {
     [Status.IDLE]: 'Ready to start',
+    [Status.FETCHING_ATTACHMENTS]: 'Reading assignment attachments...',
     [Status.SOLVING]: 'AI is analyzing and solving the assignment...',
     [Status.GENERATING_FILES]: 'Generating required files...',
     [Status.ZIPPING]: 'Packaging files into a zip archive...',
@@ -38,10 +40,7 @@ const statusMessages = {
     [Status.ERROR]: 'An error occurred.'
 };
 
-// --- ACTION REQUIRED ---
-// Replace this placeholder with your actual Gemini API Key from Google AI Studio.
-const GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY'; // 👈 Paste your Gemini API Key here
-// -----------------------
+const GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY';
 
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
@@ -52,9 +51,31 @@ const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onB
   const [zipBlob, setZipBlob] = useState<Blob | null>(null);
   const [submissionStatus, setSubmissionStatus] = useState<SubmissionStatus>('IDLE');
   const [selectedFont, setSelectedFont] = useState('Caveat');
+  const [attachmentContents, setAttachmentContents] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (assignment.attachments.length > 0) {
+        const fetchAttachments = async () => {
+            setStatus(Status.FETCHING_ATTACHMENTS);
+            const contents: Record<string, string> = {};
+            await Promise.all(
+                assignment.attachments.map(async (att) => {
+                    const content = await classroomApi.getAttachmentContent(att.driveFile.id, att.driveFile.mimeType);
+                    contents[att.title] = content;
+                })
+            );
+            setAttachmentContents(contents);
+            setStatus(Status.IDLE);
+        };
+        fetchAttachments().catch(e => {
+            console.error(e);
+            setError("Failed to read assignment attachments.");
+            setStatus(Status.ERROR);
+        });
+    }
+  }, [assignment.attachments]);
 
   const needsHandwrittenFile = useMemo(() => {
-    // This check is done before files are generated, so we check the description
     return assignment.description.toLowerCase().includes('handwritten');
   }, [assignment.description]);
 
@@ -72,11 +93,27 @@ const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onB
   const createHandwrittenPdf = async (content: string, name: string, fontFamily: string): Promise<Blob> => {
     const { jsPDF } = jspdf;
     const doc = new jsPDF();
+    
+    // Draw a realistic lined-paper background
+    doc.setDrawColor(200, 230, 255); // Light blue for lines
+    doc.setLineWidth(0.1);
+    for (let y = 20; y < 290; y += 10) { // Draw horizontal lines
+        doc.line(15, y, 195, y);
+    }
+    doc.setDrawColor(255, 180, 180); // Light red for margin line
+    doc.setLineWidth(0.2);
+    doc.line(25, 15, 25, 290);
+
+    // Set font and add text with randomization
     doc.setFont(fontFamily, 'normal');
     doc.setFontSize(14);
+    doc.setTextColor(20, 20, 80); // Dark blue ink color
     
-    const lines = doc.splitTextToSize(content, 180);
-    doc.text(lines, 15, 20);
+    const lines = doc.splitTextToSize(content, 165); // 165mm width within margins
+    const xOffset = 28 + (Math.random() - 0.5) * 2; // Randomized horizontal start
+    const yOffset = 20 + (Math.random() - 0.5) * 2; // Randomized vertical start
+    
+    doc.text(lines, xOffset, yOffset);
 
     return doc.output('blob');
   };
@@ -94,12 +131,27 @@ const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onB
     setSubmissionStatus('IDLE');
 
     try {
+        let attachmentPrompt = '';
+        if (Object.keys(attachmentContents).length > 0) {
+            attachmentPrompt = `
+The assignment includes the following attachments. Use their content as context to provide a better solution.
+ATTACHMENT CONTENTS:
+${Object.entries(attachmentContents).map(([title, content]) => `
+---
+File: ${title}
+Content:
+${content}
+---
+`).join('\n')}
+            `;
+        }
+
         const prompt = `
         You are an AI assistant helping a student with their Google Classroom assignment.
         Course: "${course.name}"
         Assignment Title: "${assignment.title}"
         Assignment Description: "${assignment.description}"
-
+        ${attachmentPrompt}
         Generate a complete solution for this assignment. Your response MUST be a valid JSON object.
         The JSON object should contain a single key "files", which is an array of file objects.
         Each file object must have three properties:
@@ -134,7 +186,6 @@ const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onB
             }
         });
 
-        // FIX: Trim whitespace from the response text before parsing as JSON to prevent errors.
         const resultJson = JSON.parse(response.text.trim());
         const filesToGenerate: GeneratedFile[] = resultJson.files;
         
@@ -169,7 +220,7 @@ const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onB
         setError("Failed to solve assignment. The AI might be unavailable or the request failed. Please try again.");
         setStatus(Status.ERROR);
     }
-  }, [assignment, course, selectedFont]);
+  }, [assignment, course, selectedFont, attachmentContents]);
   
   const handleSubmit = async () => {
     if (!assignment.studentSubmissionId) {
@@ -191,6 +242,8 @@ const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onB
     }
   };
 
+  const isSolving = status > Status.IDLE && status < Status.DONE;
+
   return (
     <div className="min-h-screen bg-secondary p-4 sm:p-6 lg:p-8 animate-fade-in">
       <div className="max-w-4xl mx-auto bg-primary p-6 sm:p-8 rounded-lg border border-border-color shadow-md">
@@ -201,10 +254,27 @@ const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onB
           <p className="text-sm text-text-secondary mt-1">From: {course.name}</p>
         </div>
         
-        <div className="bg-secondary p-4 rounded-lg border border-border-color mb-8">
+        <div className="bg-secondary p-4 rounded-lg border border-border-color mb-6">
           <h3 className="font-semibold mb-2 text-text-primary">Assignment Details</h3>
           <p className="text-text-secondary whitespace-pre-wrap">{assignment.description}</p>
         </div>
+
+        {assignment.attachments.length > 0 && (
+            <div className="bg-secondary p-4 rounded-lg border border-border-color mb-6">
+                <h3 className="font-semibold mb-3 text-text-primary flex items-center gap-2">
+                    <PaperclipIcon className="w-5 h-5" />
+                    Attachments
+                </h3>
+                <ul className="space-y-2">
+                    {assignment.attachments.map(att => (
+                        <li key={att.driveFile.id} className="text-sm text-text-secondary">
+                            <a href={att.driveFile.alternateLink} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">{att.title}</a>
+                             - <span className="text-xs">{status === Status.FETCHING_ATTACHMENTS ? 'Reading...' : (attachmentContents[att.title]?.startsWith('[Content of file') ? 'Not readable' : 'Read by AI')}</span>
+                        </li>
+                    ))}
+                </ul>
+            </div>
+        )}
         
         {needsHandwrittenFile && status < Status.GENERATING_FILES && (
             <FontSelector selectedFont={selectedFont} onSelectFont={setSelectedFont} />
@@ -214,10 +284,10 @@ const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onB
             <div className="flex-1">
                 <button 
                     onClick={handleSolve}
-                    disabled={status > Status.IDLE && status < Status.DONE}
+                    disabled={isSolving || status === Status.FETCHING_ATTACHMENTS}
                     className="w-full bg-accent text-white font-bold py-3 px-6 rounded-lg text-lg transition-all duration-300 ease-in-out disabled:bg-gray-400 disabled:cursor-not-allowed hover:bg-blue-600 shadow-sm hover:shadow-md"
                 >
-                    {status > Status.IDLE && status < Status.DONE ? 'Solving...' : 'Solve with AI'}
+                    {isSolving ? 'Solving...' : 'Solve with AI'}
                 </button>
                 {status > Status.IDLE && (
                     <div className="mt-4 text-center">
@@ -245,7 +315,7 @@ const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onB
                         ))}
                     </ul>
                 ) : (
-                    <p className="text-text-secondary text-sm text-center py-4">AI will generate files here.</p>
+                    <p className="text-text-secondary text-sm text-center py-4">{isSolving ? 'Generating...' : 'AI will generate files here.'}</p>
                 )}
 
                 {zipBlob && (
