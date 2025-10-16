@@ -1,5 +1,6 @@
 // services/auth.ts
 import type { UserProfile } from '../types';
+import { GOOGLE_CLIENT_ID, API_KEY } from './env';
 
 declare var google: any;
 declare var gapi: any;
@@ -12,15 +13,14 @@ declare global {
   }
 }
 
-// --- ACTION REQUIRED ---
-// 1. Replace these placeholders with your actual credentials from the Google Cloud Console.
-// 2. IMPORTANT: In your Google Cloud project, you MUST enable the following APIs for this app to work:
-//    - Google Classroom API
-//    - Google Drive API
-//    Go to https://console.cloud.google.com/apis/library to enable them.
-const CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID'; // 👈 Paste your OAuth 2.0 Client ID here
-const API_KEY = 'YOUR_GOOGLE_API_KEY';   // 👈 Paste your Google Cloud API Key here
-// -----------------------
+// --- CONFIGURATION NOTE ---
+// Credentials are now managed in `services/env.ts`.
+// You must also configure your OAuth consent screen in the Google Cloud Console.
+// 1. Go to "APIs & Services" -> "OAuth consent screen".
+// 2. Set the Publishing status to "Testing".
+// 3. Add your Google account email address under "Test users".
+// 4. Failure to do so will result in Google blocking login and submission features.
+// --------------------------
 
 // Scopes define the permissions the app requests from the user.
 const SCOPES = [
@@ -48,8 +48,8 @@ class AuthService {
     this.onLogin = onLoginCallback;
     this.onLogout = onLogoutCallback;
     
-    if (CLIENT_ID.startsWith('YOUR_') || API_KEY.startsWith('YOUR_')) {
-        throw new Error("API keys are not configured. Please add your credentials in services/auth.ts.");
+    if (GOOGLE_CLIENT_ID.startsWith('YOUR_') || API_KEY.startsWith('YOUR_')) {
+        throw new Error("API keys are not configured. Please add your credentials in services/env.ts.");
     }
     
     // Wait for both the gapi and gsi scripts to load to prevent race conditions.
@@ -84,7 +84,7 @@ class AuthService {
 
         // Initialize the Google Identity Services token client
         this.tokenClient = google.accounts.oauth2.initTokenClient({
-          client_id: CLIENT_ID,
+          client_id: GOOGLE_CLIENT_ID,
           scope: SCOPES,
           callback: (tokenResponse: any) => {
             if (tokenResponse && tokenResponse.access_token) {
@@ -108,7 +108,7 @@ class AuthService {
       // Prompt the user to select a Google Account and ask for consent to share their data
       this.tokenClient.requestAccessToken();
     } else {
-      console.error("Auth client not initialized. Make sure you have added your API Key and Client ID in services/auth.ts");
+      console.error("Auth client not initialized. Make sure you have added your credentials in services/env.ts");
       alert("Authentication service is not ready. This might be due to a configuration issue. Please check the console.");
     }
   }

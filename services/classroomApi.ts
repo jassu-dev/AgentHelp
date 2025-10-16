@@ -1,5 +1,5 @@
 // services/classroomApi.ts
-import type { Course, Assignment, FileBlob, Attachment } from '../types';
+import type { Course, Assignment, FileBlob, Attachment, DriveFileLink } from '../types';
 import authService from './auth';
 
 declare var gapi: any;
@@ -87,13 +87,13 @@ class ClassroomApiService {
 
   async getAttachmentContent(fileId: string, mimeType: string): Promise<string> {
     try {
-        // Handle Google Workspace file types by exporting them as plain text
         const googleMimeTypes: { [key: string]: string } = {
             'application/vnd.google-apps.document': 'text/plain',
             'application/vnd.google-apps.spreadsheet': 'text/csv',
             'application/vnd.google-apps.presentation': 'text/plain'
         };
 
+        // Handle Google Workspace file types by exporting them as plain text
         if (googleMimeTypes[mimeType]) {
             const response = await gapi.client.drive.files.export({
                 fileId: fileId,
@@ -102,8 +102,24 @@ class ClassroomApiService {
             return response.body;
         }
 
-        // For other readable types, you could add more handlers here.
-        // For now, we inform the AI we can't read non-Google Workspace files.
+        // Handle images and PDFs by downloading and base64 encoding them for the multimodal AI
+        const readableImageOrPdf = mimeType.startsWith('image/') || mimeType === 'application/pdf';
+        if (readableImageOrPdf) {
+            const response = await gapi.client.drive.files.get({
+                fileId: fileId,
+                alt: 'media'
+            });
+
+            // Prevent oversized files from breaking the AI request
+            if (response.body.length > 3 * 1024 * 1024) { // ~3MB limit
+                console.warn(`File ${fileId} (${mimeType}) is too large to be processed by AI.`);
+                return `[Content of file type (${mimeType}) is too large to be read by the assistant.]`;
+            }
+            
+            const base64Data = btoa(response.body);
+            return `data:${mimeType};base64,${base64Data}`;
+        }
+
         return `[Content of file type (${mimeType}) cannot be read by the assistant.]`;
 
     } catch (error) {
@@ -112,59 +128,44 @@ class ClassroomApiService {
     }
   }
 
-  async submitAssignment(courseId: string, courseWorkId: string, submissionId: string, files: FileBlob[]): Promise<{ success: true }> {
-    const driveFileIds = await Promise.all(
-      files.map(file => this.uploadFileToDrive(file))
-    );
-    
-    await gapi.client.classroom.courses.courseWork.studentSubmissions.modifyAttachments({
-      courseId: courseId,
-      courseWorkId: courseWorkId,
-      id: submissionId,
-      resource: {
-        addAttachments: driveFileIds.map(fileId => ({
-          driveFile: { id: fileId }
-        }))
+  async uploadFilesToDrive(files: FileBlob[]): Promise<DriveFileLink[]> {
+    const uploadPromises = files.map(async (file) => {
+      const accessToken = authService.getAccessToken();
+      if (!accessToken) throw new Error('Not authenticated');
+
+      const metadata = { name: file.name };
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+      form.append('file', file.blob);
+
+      const uploadResponse = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: form,
+      });
+
+      if (!uploadResponse.ok) {
+        const errorBody = await uploadResponse.json();
+        throw new Error(`Google Drive upload failed for ${file.name}: ${errorBody.error.message}`);
       }
+
+      const result = await uploadResponse.json();
+      const fileId = result.id;
+
+      // After uploading, get the file metadata to retrieve the webViewLink
+      const metadataResponse = await gapi.client.drive.files.get({
+        fileId: fileId,
+        fields: 'webViewLink, name, id', // Request the data we need
+      });
+
+      return {
+        name: metadataResponse.result.name,
+        id: metadataResponse.result.id,
+        link: metadataResponse.result.webViewLink,
+      };
     });
 
-    await gapi.client.classroom.courses.courseWork.studentSubmissions.turnIn({
-        courseId: courseId,
-        courseWorkId: courseWorkId,
-        id: submissionId,
-        resource: {}
-    });
-
-    return { success: true };
-  }
-
-  private async uploadFileToDrive(file: FileBlob): Promise<string> {
-    const accessToken = authService.getAccessToken();
-    if (!accessToken) throw new Error("Not authenticated");
-    
-    const metadata = {
-      name: file.name,
-    };
-
-    const form = new FormData();
-    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-    form.append('file', file.blob);
-
-    const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: form,
-    });
-
-    if (!response.ok) {
-        const errorBody = await response.json();
-        throw new Error(`Google Drive upload failed: ${errorBody.error.message}`);
-    }
-
-    const result = await response.json();
-    return result.id;
+    return Promise.all(uploadPromises);
   }
 }
 

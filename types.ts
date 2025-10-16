@@ -1,4 +1,3 @@
-
 export interface Attachment {
   title: string;
   driveFile: {
@@ -41,4 +40,10 @@ export interface UserProfile {
   name: string;
   email: string;
   picture: string;
+}
+
+export interface DriveFileLink {
+  name: string;
+  link: string;
+  id: string;
 }

@@ -1,9 +1,10 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { GoogleGenAI, Type } from '@google/genai';
-import type { Assignment, Course, GeneratedFile, FileBlob } from '../types';
-import { DownloadIcon, CheckCircleIcon, PaperclipIcon } from './icons';
+import type { Assignment, Course, GeneratedFile, FileBlob, DriveFileLink } from '../types';
+import { DownloadIcon, CheckCircleIcon, PaperclipIcon, XCircleIcon, DriveIcon, LinkIcon } from './icons';
 import classroomApi from '../services/classroomApi';
 import FontSelector from './FontSelector';
+import { API_KEY } from '../services/env';
 
 declare var jspdf: any;
 declare var JSZip: any;
@@ -20,36 +21,30 @@ enum Status {
   SOLVING,
   GENERATING_FILES,
   ZIPPING,
-  UPLOADING,
-  SUBMITTING,
+  UPLOADING_TO_DRIVE,
   DONE,
   ERROR
 }
 
-type SubmissionStatus = 'IDLE' | 'SUCCESS';
-
 const statusMessages = {
     [Status.IDLE]: 'Ready to start',
-    [Status.FETCHING_ATTACHMENTS]: 'Reading assignment attachments...',
-    [Status.SOLVING]: 'AI is analyzing and solving the assignment...',
-    [Status.GENERATING_FILES]: 'Generating required files...',
-    [Status.ZIPPING]: 'Packaging files into a zip archive...',
-    [Status.UPLOADING]: 'Uploading files to Google Drive...',
-    [Status.SUBMITTING]: 'Submitting to Google Classroom...',
-    [Status.DONE]: 'Assignment solved and ready!',
+    [Status.FETCHING_ATTACHMENTS]: 'Analyzing assignment materials...',
+    [Status.SOLVING]: 'The AI is crafting your solution...',
+    [Status.GENERATING_FILES]: 'Preparing your files for download...',
+    [Status.ZIPPING]: 'Packaging multiple files for convenience...',
+    [Status.UPLOADING_TO_DRIVE]: 'Uploading solution to your Google Drive...',
+    [Status.DONE]: 'Assignment solved and files are ready!',
     [Status.ERROR]: 'An error occurred.'
 };
 
-const GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY';
-
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+const ai = new GoogleGenAI({ apiKey: API_KEY });
 
 const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onBack }) => {
   const [status, setStatus] = useState<Status>(Status.IDLE);
   const [error, setError] = useState<string | null>(null);
   const [generatedFiles, setGeneratedFiles] = useState<FileBlob[]>([]);
   const [zipBlob, setZipBlob] = useState<Blob | null>(null);
-  const [submissionStatus, setSubmissionStatus] = useState<SubmissionStatus>('IDLE');
+  const [driveFileLinks, setDriveFileLinks] = useState<DriveFileLink[]>([]);
   const [selectedFont, setSelectedFont] = useState('Caveat');
   const [attachmentContents, setAttachmentContents] = useState<Record<string, string>>({});
 
@@ -78,6 +73,14 @@ const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onB
   const needsHandwrittenFile = useMemo(() => {
     return assignment.description.toLowerCase().includes('handwritten');
   }, [assignment.description]);
+  
+  const getAttachmentStatusText = (content: string) => {
+    if (status === Status.FETCHING_ATTACHMENTS) return 'Analyzing...';
+    if (content?.startsWith('data:')) return 'Content will be extracted by AI';
+    if (content?.startsWith('[Content of file type')) return 'File type not readable';
+    if (content?.startsWith('[Error reading')) return 'Error reading file';
+    return 'Text read by AI';
+  };
 
   const downloadFile = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -119,50 +122,53 @@ const AssignmentView: React.FC<AssignmentViewProps> = ({ assignment, course, onB
   };
 
   const handleSolve = useCallback(async () => {
-    if (GEMINI_API_KEY.startsWith('YOUR_')) {
-        setError("Please add your Gemini API Key in components/AssignmentView.tsx");
-        setStatus(Status.ERROR);
-        return;
-    }
     setStatus(Status.SOLVING);
     setError(null);
     setGeneratedFiles([]);
     setZipBlob(null);
-    setSubmissionStatus('IDLE');
+    setDriveFileLinks([]);
 
     try {
-        let attachmentPrompt = '';
-        if (Object.keys(attachmentContents).length > 0) {
-            attachmentPrompt = `
-The assignment includes the following attachments. Use their content as context to provide a better solution.
-ATTACHMENT CONTENTS:
-${Object.entries(attachmentContents).map(([title, content]) => `
----
-File: ${title}
-Content:
-${content}
----
-`).join('\n')}
-            `;
-        }
-
-        const prompt = `
+        const parts: any[] = [];
+        let textPrompt = `
         You are an AI assistant helping a student with their Google Classroom assignment.
         Course: "${course.name}"
         Assignment Title: "${assignment.title}"
         Assignment Description: "${assignment.description}"
-        ${attachmentPrompt}
-        Generate a complete solution for this assignment. Your response MUST be a valid JSON object.
+        
+        The assignment may include attachments. Use their content as context to provide a better solution.
+        `;
+
+        const attachmentParts: any[] = [];
+        for (const [title, content] of Object.entries(attachmentContents)) {
+            if (content.startsWith('data:')) {
+                const match = content.match(/^data:(.+);base64,(.+)$/);
+                if (match) {
+                    const mimeType = match[1];
+                    const data = match[2];
+                    attachmentParts.push({ text: `\n--- Attachment Content from file: ${title} ---` });
+                    attachmentParts.push({ inlineData: { mimeType, data } });
+                }
+            } else {
+                textPrompt += `\n\n--- Attachment Content from file: ${title} ---\n${content}\n--- End of Attachment ---`;
+            }
+        }
+
+        parts.push({ text: textPrompt });
+        parts.push(...attachmentParts);
+        
+        parts.push({ text: `
+        Based on all the information and attachments provided, generate a complete solution. Your response MUST be a valid JSON object.
         The JSON object should contain a single key "files", which is an array of file objects.
         Each file object must have three properties:
         1. "name": A string representing the filename (e.g., "essay.txt", "script.py").
         2. "content": A string containing the full content of the file.
         3. "handwritten": A boolean value. Set to true if the assignment description asks for a handwritten style document, otherwise false.
-        `;
+        `});
 
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
-            contents: prompt,
+            contents: { parts },
             config: {
                 responseMimeType: 'application/json',
                 responseSchema: {
@@ -222,27 +228,31 @@ ${content}
     }
   }, [assignment, course, selectedFont, attachmentContents]);
   
-  const handleSubmit = async () => {
-    if (!assignment.studentSubmissionId) {
-        setError("Cannot submit: Student submission details are missing.");
-        setStatus(Status.ERROR);
-        return;
+  const handleUploadToDrive = useCallback(async () => {
+    if (generatedFiles.length === 0 && !zipBlob) {
+      setError("No files have been generated to upload.");
+      return;
     }
     setError(null);
-    setStatus(Status.UPLOADING);
+    setStatus(Status.UPLOADING_TO_DRIVE);
     try {
-        await classroomApi.submitAssignment(course.id, assignment.id, assignment.studentSubmissionId, generatedFiles);
-        setSubmissionStatus('SUCCESS');
+        const filesToUpload: FileBlob[] = zipBlob
+            ? [{ name: `${assignment.title.replace(/\s+/g, '_')}_solution.zip`, blob: zipBlob, content: '', handwritten: false }]
+            : generatedFiles;
+      
+        const links = await classroomApi.uploadFilesToDrive(filesToUpload);
+        setDriveFileLinks(links);
         setStatus(Status.DONE);
     } catch (e: any) {
         console.error(e);
-        const errorMessage = e?.result?.error?.message || e?.message || 'An unknown error occurred. Please check the console.';
-        setError(`Submission failed: ${errorMessage}`);
+        const errorMessage = e?.message || 'An unknown error occurred while uploading. Please check the console.';
+        setError(`Upload failed: ${errorMessage}`);
         setStatus(Status.ERROR);
     }
-  };
+  }, [generatedFiles, zipBlob, assignment.title]);
 
   const isSolving = status > Status.IDLE && status < Status.DONE;
+  const progressPercentage = isSolving ? Math.max(0, ((status - 1) / (Status.DONE - 2)) * 100) : 0;
 
   return (
     <div className="min-h-screen bg-secondary p-4 sm:p-6 lg:p-8 animate-fade-in">
@@ -267,16 +277,16 @@ ${content}
                 </h3>
                 <ul className="space-y-2">
                     {assignment.attachments.map(att => (
-                        <li key={att.driveFile.id} className="text-sm text-text-secondary">
-                            <a href={att.driveFile.alternateLink} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">{att.title}</a>
-                             - <span className="text-xs">{status === Status.FETCHING_ATTACHMENTS ? 'Reading...' : (attachmentContents[att.title]?.startsWith('[Content of file') ? 'Not readable' : 'Read by AI')}</span>
+                        <li key={att.driveFile.id} className="text-sm flex justify-between items-center">
+                            <a href={att.driveFile.alternateLink} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline truncate pr-4">{att.title}</a>
+                            <span className="text-xs text-text-secondary flex-shrink-0">{getAttachmentStatusText(attachmentContents[att.title])}</span>
                         </li>
                     ))}
                 </ul>
             </div>
         )}
         
-        {needsHandwrittenFile && status < Status.GENERATING_FILES && (
+        {needsHandwrittenFile && status < Status.SOLVING && (
             <FontSelector selectedFont={selectedFont} onSelectFont={setSelectedFont} />
         )}
 
@@ -287,18 +297,8 @@ ${content}
                     disabled={isSolving || status === Status.FETCHING_ATTACHMENTS}
                     className="w-full bg-accent text-white font-bold py-3 px-6 rounded-lg text-lg transition-all duration-300 ease-in-out disabled:bg-gray-400 disabled:cursor-not-allowed hover:bg-blue-600 shadow-sm hover:shadow-md"
                 >
-                    {isSolving ? 'Solving...' : 'Solve with AI'}
+                    {isSolving ? 'Solving...' : status === Status.FETCHING_ATTACHMENTS ? 'Analyzing...' : 'Solve with AI'}
                 </button>
-                {status > Status.IDLE && (
-                    <div className="mt-4 text-center">
-                        <div className="flex items-center justify-center gap-2">
-                            {status < Status.DONE && status !== Status.ERROR && <div className="w-4 h-4 rounded-full bg-accent animate-pulse-fast"></div>}
-                            {status === Status.DONE && <CheckCircleIcon className="w-6 h-6 text-highlight" />}
-                            <p className="text-text-secondary">{statusMessages[status]}</p>
-                        </div>
-                    </div>
-                )}
-                {error && <p className="mt-4 text-red-500 text-center">{error}</p>}
             </div>
 
             <div className="flex-1 bg-secondary p-4 rounded-lg border border-border-color">
@@ -308,7 +308,7 @@ ${content}
                         {generatedFiles.map((file) => (
                             <li key={file.name} className="flex justify-between items-center bg-primary p-3 rounded-md border border-border-color">
                                 <span className="text-text-primary truncate mr-4">{file.name}</span>
-                                <button onClick={() => downloadFile(file.blob, file.name)} className="text-accent hover:text-blue-600 flex-shrink-0">
+                                <button onClick={() => downloadFile(file.blob, file.name)} className="text-accent hover:text-blue-600 flex-shrink-0" title="Download file">
                                     <DownloadIcon className="w-6 h-6" />
                                 </button>
                             </li>
@@ -328,22 +328,64 @@ ${content}
                     </button>
                 )}
                 
-                {status === Status.DONE && generatedFiles.length > 0 && (
-                     submissionStatus === 'IDLE' ? (
-                        <button
-                            onClick={handleSubmit}
-                            className="w-full bg-blue-600 text-white font-bold py-2 px-4 rounded-lg mt-4 hover:bg-blue-700 transition-colors"
-                        >
-                            Submit to Classroom
-                        </button>
-                     ) : (
-                        <div className="mt-4 p-3 bg-green-100 text-green-800 border border-green-300 rounded-lg text-center text-sm">
-                            Successfully submitted!
-                        </div>
-                     )
+                {status === Status.DONE && generatedFiles.length > 0 && driveFileLinks.length === 0 && (
+                    <button
+                        onClick={handleUploadToDrive}
+                        className="w-full bg-blue-600 text-white font-bold py-2 px-4 rounded-lg mt-4 hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                    >
+                        <DriveIcon className="w-5 h-5" />
+                        Upload Files to Drive
+                    </button>
                 )}
             </div>
         </div>
+
+        {status > Status.IDLE && (
+            <div className="mt-6 p-4 bg-secondary border border-border-color rounded-lg animate-fade-in">
+                <div className="flex items-center mb-3">
+                    {status === Status.ERROR ? (
+                        <XCircleIcon className="w-6 h-6 text-red-500 mr-3 flex-shrink-0" />
+                    ) : status === Status.DONE ? (
+                        <CheckCircleIcon className="w-6 h-6 text-highlight mr-3 flex-shrink-0" />
+                    ) : (
+                        <div className="w-5 h-5 border-2 border-accent border-t-transparent rounded-full animate-spin mr-3 flex-shrink-0"></div>
+                    )}
+                    <div>
+                        <p className="font-semibold text-text-primary">
+                            {status === Status.ERROR ? 'An Error Occurred' 
+                             : status === Status.DONE ? (driveFileLinks.length > 0 ? 'Files Uploaded to Your Drive!' : 'Ready!')
+                             : 'Processing...'}
+                        </p>
+                        <p className="text-sm text-text-secondary">
+                            {error || statusMessages[status]}
+                        </p>
+                    </div>
+                </div>
+                 {isSolving && (
+                    <div className="relative pt-1">
+                        <div className="overflow-hidden h-2 text-xs flex rounded bg-accent/20">
+                            <div style={{ width: `${progressPercentage}%`}} className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-accent transition-all duration-500"></div>
+                        </div>
+                    </div>
+                )}
+                {driveFileLinks.length > 0 && (
+                    <div className="mt-4 border-t border-border-color pt-4">
+                        <h4 className="font-semibold text-text-primary mb-2">Next step: Add these files to your assignment in Google Classroom.</h4>
+                        <ul className="space-y-2">
+                            {driveFileLinks.map(file => (
+                                <li key={file.id} className="flex items-center justify-between bg-primary p-2 rounded-md">
+                                    <span className="text-sm text-text-secondary truncate pr-4">{file.name}</span>
+                                    <a href={file.link} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-sm text-accent font-semibold hover:underline">
+                                        <LinkIcon className="w-4 h-4" />
+                                        Open in Drive
+                                    </a>
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
+            </div>
+        )}
       </div>
     </div>
   );

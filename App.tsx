@@ -45,7 +45,7 @@ function App() {
           <p className="mt-4 text-left">
             <strong>How to fix:</strong>
             <ul className="list-disc list-inside mt-2">
-                <li>Ensure you have replaced the placeholder values for `CLIENT_ID` and `API_KEY` in the `services/auth.ts` file.</li>
+                <li>Ensure you have replaced the placeholder values for `GOOGLE_CLIENT_ID` and `API_KEY` in the <strong>`services/env.ts`</strong> file.</li>
                 <li>Go to your Google Cloud Console and make sure you have <strong>enabled</strong> both the <strong>Google Classroom API</strong> and the <strong>Google Drive API</strong> for your project.</li>
             </ul>
           </p>
